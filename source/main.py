@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import gc
 import json
 import numpy as np
 import os
@@ -9,10 +8,8 @@ import random
 import time
 import torch
 import torch.nn as nn
-import wandb
 
 from tqdm import tqdm
-from transformers import AdamW
 from transformers import get_linear_schedule_with_warmup
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from typing import Dict, Generator, List, Optional, Tuple, Union
@@ -20,8 +17,8 @@ from typing import Dict, Generator, List, Optional, Tuple, Union
 # Import custom modules
 import constant
 
-from models import TransformerVecModel
-from models import TransformerBoxModel
+from models.transformer_vec_model import TransformerVecModel
+from models.transformer_box_model import TransformerBoxModel
 from data_utils import DatasetLoader
 from data_utils import to_torch
 
@@ -303,9 +300,7 @@ def get_data_gen(dataname: str,
     return data_gen
 
 
-def get_all_datasets(
-        args: argparse.Namespace, tokenizer: object
-) -> List[Generator[Dict, None, None]]:
+def get_all_datasets(args: argparse.Namespace, tokenizer: object) -> List[Generator[Dict, None, None]]:
     """Returens a list of training data geenrators."""
     train_gen_list = []
     if args.mode in ["train"]:

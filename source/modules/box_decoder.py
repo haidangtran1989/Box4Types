@@ -1,15 +1,14 @@
-"""Pytorch modules."""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
-# Import custom modules
 from box_wrapper import BoxTensor, log1mexp
 from box_wrapper import CenterBoxTensor
 from box_wrapper import ConstantBoxTensor, CenterSigmoidBoxTensor
+from modules.type_self_attention_layer import TypeSelfAttentionLayer
+from utils.mention_context_similarity import get_mention_context_similarity
 
 euler_gamma = 0.57721566490153286060
 
@@ -40,103 +39,6 @@ def _compute_hard_min_max(
     min_point = torch.max(box1.z, box2.z)
     max_point = torch.min(box1.Z, box2.Z)
     return min_point, max_point
-
-
-class LinearProjection(nn.Module):
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 bias: bool = True):
-        super(LinearProjection, self).__init__()
-        self.linear = nn.Linear(input_dim, output_dim, bias=bias)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        outputs = self.linear(inputs)
-        return outputs
-
-
-class SimpleFeedForwardLayer(nn.Module):
-    """2-layer feed forward"""
-
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 bias: bool = True,
-                 activation: Optional[nn.Module] = None):
-        super(SimpleFeedForwardLayer, self).__init__()
-        self.linear_projection1 = nn.Linear(input_dim,
-                                            (input_dim + output_dim) // 2,
-                                            bias=bias)
-        self.linear_projection2 = nn.Linear((input_dim + output_dim) // 2,
-                                            output_dim,
-                                            bias=bias)
-        self.activation = activation if activation else nn.Sigmoid()
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        inputs = self.activation(self.linear_projection1(inputs))
-        inputs = self.activation(self.linear_projection2(inputs))
-        return inputs
-
-
-class HighwayNetwork(nn.Module):
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 n_layers: int,
-                 activation: Optional[nn.Module] = None):
-        super(HighwayNetwork, self).__init__()
-        self.n_layers = n_layers
-        self.nonlinear = nn.ModuleList(
-            [nn.Linear(input_dim, input_dim) for _ in range(n_layers)])
-        self.gate = nn.ModuleList(
-            [nn.Linear(input_dim, input_dim) for _ in range(n_layers)])
-        for layer in self.gate:
-            layer.bias = torch.nn.Parameter(0. * torch.ones_like(layer.bias))
-        self.final_linear_layer = nn.Linear(input_dim, output_dim)
-        self.activation = nn.ReLU() if activation is None else activation
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        for layer_idx in range(self.n_layers):
-            gate_values = self.sigmoid(self.gate[layer_idx](inputs))
-            nonlinear = self.activation(self.nonlinear[layer_idx](inputs))
-            inputs = gate_values * nonlinear + (1. - gate_values) * inputs
-        return self.final_linear_layer(inputs)
-
-
-class TypeSelfAttentionLayer(nn.Module):
-    def __init__(self,
-                 scale: float = 1.0,
-                 attn_dropout: float = 0.0):
-        super(TypeSelfAttentionLayer, self).__init__()
-        self.scale = scale
-        self.dropout = nn.Dropout(attn_dropout)
-
-    def forward(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        attn = torch.matmul(q, k.transpose(1, 2)) / self.scale
-        if mask is not None:
-            attn = attn.masked_fill(mask == 0, -1e9)
-        attn = self.dropout(F.softmax(attn, dim=-1))
-        output = torch.matmul(attn, v)
-        return output, attn
-
-
-class SimpleDecoder(nn.Module):
-    def __init__(self, output_dim: int, answer_num: int):
-        super(SimpleDecoder, self).__init__()
-        self.answer_num = answer_num
-        self.linear = nn.Linear(output_dim, answer_num, bias=False)
-
-    def forward(self,
-                inputs: torch.Tensor) -> torch.Tensor:
-        output_embed = self.linear(inputs)
-        return output_embed
 
 
 class BoxDecoder(nn.Module):
@@ -296,7 +198,7 @@ class BoxDecoder(nn.Module):
 
     def forward(
             self,
-            mc_box: torch.Tensor,
+            mention_context_box: torch.Tensor,
             targets: Optional[torch.Tensor] = None,
             is_training: bool = True,
             batch_num: Optional[int] = None
@@ -306,100 +208,5 @@ class BoxDecoder(nn.Module):
                               dtype=torch.int64,
                               device=self.box_embeddings.weight.device)
         emb = self.box_embeddings(inputs)  # num types x 2*box_embedding_dim
-
-        if self.box_type == 'ConstantBoxTensor':
-            type_box = self.box.from_split(emb, self.box_offset)
-        else:
-            type_box = self.box.from_split(emb)
-
-        # Get intersection
-        batch_size = mc_box.data.size()[0]
-        # Expand both mention&context and type boxes to the shape of batch_size x
-        # num_types x box_embedding_dim. (torch.expand doesn't use extra memory.)
-        if self.use_gumbel_baysian:  # Gumbel box
-            min_point = torch.stack(
-                [mc_box.z.unsqueeze(1).expand(-1, self.num_embeddings, -1),
-                 type_box.z.unsqueeze(0).expand(batch_size, -1, -1)])
-            min_point = torch.max(
-                self.gumbel_beta * torch.logsumexp(min_point / self.gumbel_beta, 0),
-                torch.max(min_point, 0)[0])
-
-            max_point = torch.stack([
-                mc_box.Z.unsqueeze(1).expand(-1, self.num_embeddings, -1),
-                type_box.Z.unsqueeze(0).expand(batch_size, -1, -1)])
-            max_point = torch.min(
-                -self.gumbel_beta * torch.logsumexp(-max_point / self.gumbel_beta, 0),
-                torch.min(max_point, 0)[0])
-
-        else:
-            min_point = torch.max(
-                torch.stack([
-                    mc_box.z.unsqueeze(1).expand(-1, self.num_embeddings, -1),
-                    type_box.z.unsqueeze(0).expand(batch_size, -1, -1)]), 0)[0]
-
-            max_point = torch.min(
-                torch.stack([
-                    mc_box.Z.unsqueeze(1).expand(-1, self.num_embeddings, -1),
-                    type_box.Z.unsqueeze(0).expand(batch_size, -1, -1)]), 0)[0]
-
-        # Get soft volume
-        # batch_size x num types
-        # Compute the volume of the intersection
-        vol1 = self.log_soft_volume(min_point,
-                                    max_point,
-                                    temp=self.inv_softplus_temp,
-                                    scale=self.softplus_scale,
-                                    gumbel_beta=self.gumbel_beta)
-
-        # Compute  the volume of the mention&context box
-        vol2 = self.log_soft_volume(mc_box.z,
-                                    mc_box.Z,
-                                    temp=self.inv_softplus_temp,
-                                    scale=self.softplus_scale,
-                                    gumbel_beta=self.gumbel_beta)
-
-        # Returns log probs
-        log_probs = vol1 - vol2.unsqueeze(-1)
-
-        # Clip values > 1. for numerical stability.
-        if (log_probs > 0.0).any():
-            print("WARNING: Clipping log probability since it's grater than 0.")
-            log_probs[log_probs > 0.0] = 0.0
-
-        return log_probs, None, None
-
-
-class BCEWithLogProbLoss(nn.BCELoss):
-
-    def _binary_cross_entropy(self,
-                              input: torch.Tensor,
-                              target: torch.Tensor,
-                              weight: Optional[torch.Tensor] = None,
-                              reduction: str = 'mean') -> torch.Tensor:
-        """Computes binary cross entropy.
-
-        This function takes log probability and computes binary cross entropy.
-
-        Args:
-          input: Torch float tensor. Log probability. Same shape as `target`.
-          target: Torch float tensor. Binary labels. Same shape as `input`.
-          weight: Torch float tensor. Scaling loss if this is specified.
-          reduction: Reduction method. 'mean' by default.
-        """
-        loss = -target * input - (1 - target) * log1mexp(input)
-
-        if weight is not None:
-            loss = loss * weight
-
-        if reduction == 'none':
-            return loss
-        elif reduction == 'mean':
-            return loss.mean()
-        else:
-            return loss.sum()
-
-    def forward(self, input, target, weight=None):
-        return self._binary_cross_entropy(input,
-                                          target,
-                                          weight=weight,
-                                          reduction=self.reduction)
+        type_box = self.box.from_split(emb)
+        return get_mention_context_similarity(mention_context_box, type_box)
