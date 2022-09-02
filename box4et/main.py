@@ -489,7 +489,7 @@ def load_model(reload_model_name: str,
   else:
     model_file_name = "{0:s}/{1:s}.pt".format(save_dir, model_id)
   checkpoint = torch.load(model_file_name)
-  model.load_state_dict(checkpoint["state_dict"])
+  model.load_state_dict(checkpoint["state_dict"], strict=False)
   if optimizer_enc and optimizer_cls:  # Continue training
     optimizer_enc.load_state_dict(checkpoint["optimizer_enc"])
     optimizer_cls.load_state_dict(checkpoint["optimizer_cls"])
@@ -571,305 +571,6 @@ def get_eval_string(true_prediction: List[Tuple[List[str], List[str]]]) -> str:
   return output_str
 
 
-"""
-Training 
-"""
-
-def _train(args: argparse.Namespace,
-           model: Union[TransformerVecModel, TransformerBoxModel],
-           device: torch.device):
-  if args.use_wandb:
-    # Use Weights and Biases
-    print("==> Start training with Weights and Biases...")
-    wandb.init(project=args.wandb_project_name,
-               entity=args.wandb_username,
-               name=args.model_id)
-    wandb.config.update(args)
-    wandb.watch(model)
-    #save_model_to = wandb.run.dir
-    save_model_to = os.path.join(constant.EXP_ROOT, args.model_id)
-  else:
-    print("==> Start training...")
-    save_model_to = os.path.join(constant.EXP_ROOT, args.model_id)
-  if not os.path.exists(save_model_to):
-    print("==> Create {}".format(save_model_to))
-    os.makedirs(save_model_to, exist_ok=False)
-  print("==> Trained models will be saved at {}".format(save_model_to))
-  args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-  args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-  print("==> Loading data generator... ")
-  train_gen_list = get_all_datasets(args, model.transformer_tokenizer)
-  print("==> Loading ID -> TYPE mapping... ")
-  _word2id = constant.load_vocab_dict(constant.TYPE_FILES[args.goal])
-  id2word_dict = {v: k for k, v in _word2id.items()}
-  print("done. {} data gen(s)".format(len(train_gen_list)))
-  print("Model Type: {}".format(args.model_type))
-  total_loss = 0.
-  batch_num = 0
-  num_evals = 0
-  best_macro_f1 = 0.
-  start_time = time.time()
-  init_time = time.time()
-  print(
-    "Total {} named params.".format(
-      len([n for n, p in model.named_parameters()])))
-  no_decay = ["bias", "LayerNorm.weight"]
-  classifier_param_prefix = ["classifier",
-                             "proj_layer",
-                             "linear_projection",
-                             "encoder_layer_proj"]
-  encoder_parameters = [
-    {
-      "params": [p for n, p in model.named_parameters()
-                 if not any(nd in n for nd in no_decay)
-                 and not any(n.startswith(pre)
-                             for pre in classifier_param_prefix)],
-      "weight_decay": 0.0  #args.weight_decay,
-    },
-    {
-      "params": [p for n, p in model.named_parameters()
-                 if any(nd in n for nd in no_decay)
-                 and not any(n.startswith(pre)
-                             for pre in classifier_param_prefix)],
-      "weight_decay": 0.0
-    },
-  ]
-  classifier_parameters = [
-    {
-      "params": [p for n, p in model.named_parameters()
-                 if any(n.startswith(pre) for pre in classifier_param_prefix)],
-      "weight_decay": 0.0
-    },
-  ]
-  classifier_parameter_names = set(
-    [n for n, p in model.named_parameters()
-     if any(n.startswith(pre) for pre in classifier_param_prefix)])
-  print(
-    "Encoder {}, Classifier {}".format(
-      sum([len(p["params"]) for p in encoder_parameters]),
-      sum([len(p["params"]) for p in classifier_parameters])
-    )
-  )
-  print("classifier_parameters:", [n for n, p in model.named_parameters()
-                                   if any(n.startswith(pre)
-                                          for pre in classifier_param_prefix)])
-  optimizer_enc = AdamW(encoder_parameters,
-                        lr=args.learning_rate_enc,
-                        eps=args.adam_epsilon_enc)
-  optimizer_cls = AdamW(classifier_parameters,
-                        lr=args.learning_rate_cls,
-                        eps=args.adam_epsilon_cls)
-  scheduler_enc = None
-  if args.use_scheduler_enc:
-    scheduler_enc = get_lr_scheduler(
-      args.scheduler_type,
-      optimizer_enc,
-      warmup_steps=args.warmup_steps,
-      max_steps=args.max_steps,
-      base_lr=args.learning_rate_enc / 2.,
-      max_lr=args.learning_rate_enc,
-      step_size_up=int(args.step_size_up / args.gradient_accumulation_steps))
-    print("Using lr scheduler (enc): base_lr={}, max_lr={}, "
-          "step_size_up={}".format(
-      args.learning_rate_enc / 2.,
-      args.learning_rate_enc,
-      int(args.step_size_up / args.gradient_accumulation_steps)))
-
-  scheduler_cls = None
-  if args.use_scheduler_cls:
-    scheduler_cls = get_lr_scheduler(
-      args.scheduler_type,
-      optimizer_enc,
-      warmup_steps=args.warmup_steps,
-      max_steps=args.max_steps,
-      base_lr=args.learning_rate_cls / 10.,
-      max_lr=args.learning_rate_cls,
-      step_size_up=int(args.step_size_up / args.gradient_accumulation_steps))
-    print("Using lr scheduler (cls): base_lr={}, max_lr={}, "
-          "step_size_up={}".format(
-      args.learning_rate_cls / 10.,
-      args.learning_rate_cls,
-      int(args.step_size_up / args.gradient_accumulation_steps)))
-  if args.n_gpu > 1:
-    model = torch.nn.DataParallel(model)
-  if args.load:
-    load_model(args.reload_model_name,
-               constant.EXP_ROOT,
-               args.model_id,
-               model,
-               optimizer_enc,
-               optimizer_cls)
-  optimizer_enc.zero_grad()
-  optimizer_cls.zero_grad()
-  set_seed(args.seed, args.n_gpu)
-  continue_training = True
-  while continue_training:
-    batch_num += 1  # single batch composed of all train signal passed by.
-    for data_gen in train_gen_list:
-      try:
-        batch = next(data_gen)
-        inputs, targets = to_torch(batch, device)
-      except StopIteration:
-        print("Done!")
-        torch.save(
-          {
-            "state_dict": model.state_dict(),
-            "optimizer_cls": optimizer_cls.state_dict(),
-            "optimizer_enc": optimizer_enc.state_dict(),
-            "scheduler_cls": scheduler_cls.state_dict()
-            if scheduler_cls is not None else None,
-            "scheduler_enc": scheduler_enc.state_dict()
-            if scheduler_enc is not None else None,
-            "args": args
-          },
-          "{0:s}/{1:s}.pt".format(save_model_to, args.model_id)
-        )
-        return
-      model.train()
-
-      #with autograd.detect_anomaly():
-      if True:
-        if args.model_type != "distilbert":
-          inputs["token_type_ids"] = (
-            batch["token_type_ids"] if args.model_type in ["bert",
-                                                           "xlnet",
-                                                           "albert"] else None
-          )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_id
-        loss, output_logits = model(inputs,
-                                    targets,
-                                    batch_num=batch_num)
-
-        if args.alpha_l2_reg_cls > 0.:
-          l2_reg = torch.tensor(0., device=args.device)
-          for n, p in model.named_parameters():
-            if n in classifier_parameter_names:
-              l2_reg += torch.norm(p)
-          loss += args.alpha_l2_reg_cls * l2_reg
-
-        if args.n_gpu > 1:
-          loss = loss.mean()  # mean() to average on multi-gpu parallel training
-        if args.gradient_accumulation_steps > 1:
-          loss = loss / args.gradient_accumulation_steps
-        loss.backward()
-        total_loss += loss.item()
-
-      if batch_num % args.gradient_accumulation_steps == 0:
-        if torch.isnan(loss).any():
-          print("WARNING: Loss is nan at update: {}.".format(batch_num))
-          print(loss)
-          continue
-        else:
-          optimizer_enc.step()
-          optimizer_cls.step()
-          if args.use_scheduler_enc:
-            scheduler_enc.step()
-          if args.use_scheduler_cls:
-            scheduler_cls.step()
-
-        optimizer_enc.zero_grad()
-        optimizer_cls.zero_grad()
-
-        if batch_num % args.log_period == 0 and batch_num > 0:
-          gc.collect()
-          cur_loss = float(1.0 * loss.clone().item())
-          elapsed = time.time() - start_time
-          train_loss_str = (
-            "|loss {0:3f} | at {1:d}step | @ {2:.2f} ms/batch".format(
-              cur_loss, batch_num, elapsed * 1000 / args.log_period))
-          start_time = time.time()
-          print(train_loss_str)
-
-        if batch_num % args.eval_period == 0 and batch_num > 0:
-          output_index = get_output_index(
-            output_logits,
-            threshold=args.threshold,
-            is_prob=True if args.emb_type == "box" else False)
-          gold_pred_train = get_gold_pred_str(
-            output_index,
-              batch["targets"].data.cpu().clone(),
-              id2word_dict)
-          print(gold_pred_train[:10])
-          accuracy = sum(
-            [set(y) == set(yp) for y, yp in gold_pred_train]
-          ) * 1.0 / len(gold_pred_train)
-          train_acc_str = "==> Train EM: {0:.1f}%".format(accuracy * 100)
-          print(train_acc_str)
-
-    if batch_num % args.eval_period == 0 and batch_num > args.eval_after:
-      # Evaluate Loss on the Turk Dev dataset.
-      print("---- eval at step {0:d} ---".format(batch_num))
-      eval_loss, macro_f1, macro_p, macro_r,\
-      micro_f1, micro_p, micro_r, accuracy = \
-        evaluate_data(
-            batch_num, args.dev_data, model, id2word_dict, args, device)
-
-      if args.use_wandb:
-        cur_loss = float(1.0 * loss.clone().item())
-        wandb.log(
-          {
-            "Dev Mi-P": micro_p,
-            "Dev Mi-R": micro_r,
-            "Dev Mi-F1": micro_f1,
-            "Dev Ma-P": macro_p,
-            "Dev Ma-R": macro_r,
-            "Dev Ma-F1": macro_f1,
-            "Dev Acc": accuracy * 100,
-            "Dev Loss": eval_loss,
-            "Train Loss": cur_loss
-        })
-
-      if args.save_best_model and best_macro_f1 < macro_f1:
-        best_macro_f1 = macro_f1
-        save_fname = "{0:s}/{1:s}_best.pt".format(save_model_to, args.model_id)
-        torch.save(
-          {
-            "state_dict": model.state_dict(),
-            "optimizer_cls": optimizer_cls.state_dict(),
-            "optimizer_enc": optimizer_enc.state_dict(),
-            "scheduler_cls": scheduler_cls.state_dict()
-            if scheduler_cls is not None else None,
-            "scheduler_enc": scheduler_enc.state_dict()
-            if scheduler_enc is not None else None,
-            "args": args
-          },
-          save_fname
-        )
-        print(
-          "Total {0:.2f} minutes have passed, saving at {1:s} ".format(
-            (time.time() - init_time) / 60, save_fname))
-
-      num_evals += 1
-      if 0 < args.max_num_eval == num_evals:
-        print("Evaluated {} times. Stop training.".format(num_evals))
-        # This kills the outer WHILE loop.
-        continue_training = False
-
-    if batch_num % args.save_period == 0 and batch_num > 700:
-      save_fname = "{0:s}/{1:s}_{2:d}.pt".format(save_model_to,
-                                                 args.model_id,
-                                                 batch_num)
-      torch.save(
-        {
-          "state_dict": model.state_dict(),
-          "optimizer_cls": optimizer_cls.state_dict(),
-          "optimizer_enc": optimizer_enc.state_dict(),
-          "scheduler_cls": scheduler_cls.state_dict()
-          if scheduler_cls is not None else None,
-          "scheduler_enc": scheduler_enc.state_dict()
-          if scheduler_enc is not None else None,
-          "args": args
-        },
-        save_fname
-      )
-      print(
-        "Total {0:.2f} minutes have passed, saving at {1:s} ".format(
-          (time.time() - init_time) / 60, save_fname))
-
-
-"""
-Test
-"""
-
 def _test(args: argparse.Namespace,
           model: Union[TransformerVecModel, TransformerBoxModel],
           device: torch.device):
@@ -892,9 +593,6 @@ def _test(args: argparse.Namespace,
   load_model(args.reload_model_name,
              constant.EXP_ROOT,
              args.model_id, model)
-  if args.n_gpu > 1:
-    model = torch.nn.DataParallel(model)
-    print("==> use", torch.cuda.device_count(), "GPUs.")
   for name, dataset in [(test_fname, data_gens[0])]:
     print("Processing... " + name)
     total_gold_pred = []
@@ -902,24 +600,14 @@ def _test(args: argparse.Namespace,
     total_probs = []
     total_ys = []
     for batch_num, batch in enumerate(dataset):
-      if batch_num % 100 == 0:
-        print(batch_num)
-      if not isinstance(batch, dict):
-        print("==> batch: ", batch)
       inputs, targets = to_torch(batch, device)
       annot_ids = batch.pop("ex_ids")
-      if args.n_gpu > 1:
-        output_logits = model(inputs, targets)
-      else:
-        _, output_logits = model(inputs)
+      _, output_logits = model(inputs)
       output_index = get_output_index(
         output_logits,
         threshold=args.threshold,
         is_prob=True if args.emb_type == "box" else False)
-      if args.emb_type == "box":
-        output_prob = output_logits.data.cpu().clone().numpy()
-      else:
-        output_prob = model.sigmoid_fn(output_logits).data.cpu().clone().numpy()
+      output_prob = output_logits.data.cpu().clone().numpy()
       y = batch["targets"].data.cpu().clone()
       gold_pred = get_gold_pred_str(output_index, y, id2word_dict)
       total_probs.extend(output_prob)
@@ -945,48 +633,20 @@ def main():
   args = parser.parse_args()
   # Lower text for BERT uncased models
   args.do_lower = True if "uncased" in args.model_type else False
-  # Setup CUDA, GPU & distributed training
-  assert torch.cuda.is_available()
-  if args.local_rank == -1:
-    device = torch.device("cuda")
-    args.n_gpu = 1  #torch.cuda.device_count()
-  else:
-    # Initializes the distributed backend which will take care of synchronizing
-    # nodes/GPUs
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    torch.distributed.init_process_group(backend="nccl")
-    args.n_gpu = 1
+  device = torch.device("cuda")
+  args.n_gpu = 1
   args.device = device
   set_seed(args.seed, args.n_gpu)
   # Load pretrained model and tokenizer
   if args.local_rank not in [-1, 0]:
     torch.distributed.barrier()
-  if args.emb_type == "baseline":
-    print("TransformerVecModel")
-    model = TransformerVecModel(args, constant.ANSWER_NUM_DICT[args.goal])
-  elif args.emb_type == "box":
-    print("TransformerBoxModel")
-    model = TransformerBoxModel(args, constant.ANSWER_NUM_DICT[args.goal])
-  else:
-    raise NotImplementedError
+  model = TransformerBoxModel(args, constant.ANSWER_NUM_DICT[args.goal])
   if args.local_rank == 0:
     torch.distributed.barrier()
   model.to(args.device)
   args.max_position_embeddings = \
       model.transformer_config.max_position_embeddings
-  print("-" * 80)
-  for k, v in vars(args).items():
-    print(k, ":", v)
-  print("-" * 80)
-  if args.mode == "train":
-    print("==> mode: train")
-    _train(args, model, device)
-  elif args.mode == "test":
-    print("==> mode: test")
-    _test(args, model, device)
-  else:
-    raise ValueError("invalid value for 'mode': {}".format(args.mode))
+  _test(args, model, device)
 
 
 if __name__ == "__main__":

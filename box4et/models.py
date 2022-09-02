@@ -250,54 +250,9 @@ class TransformerBoxModel(TransformerVecModel):
                                                          self.box_offset)
         else:
             mention_context_rep = self.mc_box.from_split(mention_context_rep)
-
         # Compute probs (0-1 scale)
-        if self.training and targets is not None:
-            log_probs, loss_weights, targets = self.classifier(
-                mention_context_rep,
-                targets=targets,
-                is_training=self.training,
-                batch_num=batch_num)
-        else:  # eval
-            log_probs, loss_weights, _ = self.classifier(mention_context_rep,
-                                                         targets=targets,
-                                                         is_training=self.training,
-                                                         batch_num=batch_num)
-
-        if targets is not None:
-            loss = self.define_loss(log_probs, targets, weight=loss_weights)
-
-            if self.alpha_type_reg > 0. and self.type_box_type != \
-                    'ConstantBoxTensor' and self.training:
-                log_vol = self.classifier.type_box_volume()
-                type_vol_mask = (log_vol > self.th_type_vol)
-                loss += self.alpha_type_reg * torch.exp(
-                    log_vol[type_vol_mask]).sum()
-
-            if self.alpha_type_vol_l1 and self.training:
-                type_vol = torch.exp(self.classifier.type_box_volume())
-                type_vol_l1 = torch.abs(type_vol - self.type_marginals).sum()
-                loss += self.alpha_type_vol_l1 * type_vol_l1
-
-            if self.alpha_type_vol_l2 and self.training:
-                type_vol = torch.exp(self.classifier.type_box_volume())
-                type_vol_l2 = torch.pow(type_vol - self.type_marginals, 2).sum()
-                loss += self.alpha_type_vol_l2 * type_vol_l2
-
-            if self.alpha_hierarchy_loss > 0. and self.training:
-                type_pairs = self.type_pairs
-                gold_type_pairs_conditional = self.type_pairs_conditional
-                type_x_ids = type_pairs[:, 0]
-                type_y_ids = type_pairs[:, 1]
-                pred_type_pairs_conditional = \
-                    self.classifier.get_pairwise_conditional_prob(
-                        type_x_ids, type_y_ids)
-                hierarchy_loss = self.hierarchy_loss_func(
-                    pred_type_pairs_conditional,
-                    gold_type_pairs_conditional)
-                loss += self.alpha_hierarchy_loss * hierarchy_loss
-
-        else:
-            loss = None
-
-        return loss, torch.exp(log_probs)
+        log_probs, loss_weights, _ = self.classifier(mention_context_rep,
+                                                     targets=targets,
+                                                     is_training=self.training,
+                                                     batch_num=batch_num)
+        return None, torch.exp(log_probs)

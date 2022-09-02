@@ -368,30 +368,7 @@ class BoxDecoder(nn.Module):
       print("WARNING: Clipping log probability since it's grater than 0.")
       log_probs[log_probs > 0.0] = 0.0
 
-    if is_training and targets is not None and self.n_negatives > 0:
-      pos_idx = torch.where(targets.sum(dim=0) > 0.)[0]
-      neg_idx = torch.where(targets.sum(dim=0) == 0.)[0]
-
-      if self.n_negatives < neg_idx.size()[0]:
-        neg_idx = neg_idx[torch.randperm(len(neg_idx))[:self.n_negatives]]
-        log_probs_pos = log_probs[:, pos_idx]
-        log_probs_neg = log_probs[:, neg_idx]
-        _log_probs = torch.cat([log_probs_pos, log_probs_neg], dim=-1)
-        _targets = torch.cat([targets[:, pos_idx], targets[:, neg_idx]], dim=-1)
-        _weights = None
-        if self.neg_temp > 0.0:
-          _neg_logits = log_probs_neg - log1mexp(log_probs_neg)
-          _neg_weights = F.softmax(_neg_logits * self.neg_temp, dim=-1)
-          _pos_weights = torch.ones_like(log_probs_pos,
-                                         device=self.box_embeddings.weight.device)
-          _weights = torch.cat([_pos_weights, _neg_weights], dim=-1)
-        return _log_probs, _weights, _targets
-      else:
-        return log_probs, None, targets
-    elif is_training and targets is not None and self.n_negatives <= 0:
-      return log_probs, None, targets
-    else:
-      return log_probs, None, None
+    return log_probs, None, None
 
 
 class BCEWithLogProbLoss(nn.BCELoss):
