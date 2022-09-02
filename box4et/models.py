@@ -24,7 +24,6 @@ from constant import load_vocab_dict
 from constant import TYPE_FILES
 from constant import BASE_PATH
 
-
 TRANSFORMER_MODELS = {
     "bert-base-uncased": (BertModel, BertTokenizer),
     "bert-large-uncased": (BertModel, BertTokenizer),
