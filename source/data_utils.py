@@ -58,8 +58,7 @@ def get_example(
                 mention_seq = mention_seq[:mention_length_limit]
             mention = ' '.join(mention_seq)
             context = ' '.join(left_seq + mention_seq + right_seq)
-            len_after_tokenization = len(
-                tokenizer.encode_plus(mention, context)["input_ids"])
+            len_after_tokenization = len(tokenizer.encode_plus(mention, context)["input_ids"])
             if len_after_tokenization > max_len:
                 overflow_len = len_after_tokenization - max_len
                 context = " ".join(left_seq + mention_seq + right_seq[:-overflow_len])

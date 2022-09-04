@@ -209,4 +209,18 @@ class BoxDecoder(nn.Module):
                               device=self.box_embeddings.weight.device)
         emb = self.box_embeddings(inputs)  # num types x 2*box_embedding_dim
         type_box = self.box.from_split(emb)
-        return get_mention_context_similarity(mention_context_box, type_box)
+        return get_mention_context_similarity(mention_context_box, type_box), None, None
+
+
+def get_classifier(args, answer_num):
+    return BoxDecoder(answer_num,
+                                 args.box_dim,
+                                 args.type_box_type,
+                                 inv_softplus_temp=args.inv_softplus_temp,
+                                 softplus_scale=args.softplus_scale,
+                                 n_negatives=args.n_negatives,
+                                 neg_temp=args.neg_temp,
+                                 box_offset=args.box_offset,
+                                 pretrained_box=None,
+                                 use_gumbel_baysian=args.use_gumbel_baysian,
+                                 gumbel_beta=args.gumbel_beta)

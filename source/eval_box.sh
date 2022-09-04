@@ -21,3 +21,6 @@ CUDA_VISIBLE_DEVICES=0 python3 -u main.py \
     --proj_layer highway \
     --per_gpu_eval_batch_size 8 \
     --eval_data ${DATA_NAME}/${DATA_NAME}_dev.json
+
+#1998 1998
+#Eval: 1998 1998 3.694 P:0.526 R:0.360 F1:0.427 Ma_P:0.529 Ma_R:0.391 Ma_F1:0.450	 Dev EM: 1.9%

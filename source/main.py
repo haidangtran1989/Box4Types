@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import json
 import numpy as np
@@ -8,23 +7,13 @@ import random
 import time
 import torch
 import torch.nn as nn
-
 from tqdm import tqdm
-from transformers import get_linear_schedule_with_warmup
-from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from typing import Dict, Generator, List, Optional, Tuple, Union
-
-# Import custom modules
 import constant
-
-from models.transformer_vec_model import TransformerVecModel
-from models.transformer_box_model import TransformerBoxModel
+from models.transformer_box_model_v1 import TransformerBoxModelV1
 from data_utils import DatasetLoader
 from data_utils import to_torch
-
-"""
-Args
-"""
+from modules.box_decoder import get_classifier
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_id", help = "Identifier for model")
@@ -301,7 +290,6 @@ def get_data_gen(dataname: str,
 
 
 def get_all_datasets(args: argparse.Namespace, tokenizer: object) -> List[Generator[Dict, None, None]]:
-    """Returens a list of training data geenrators."""
     train_gen_list = []
     if args.mode in ["train"]:
         for train_data_path in args.train_data.split(","):
@@ -313,7 +301,6 @@ def get_all_datasets(args: argparse.Namespace, tokenizer: object) -> List[Genera
 def get_datasets(data_lists: List[Tuple[str, str]],
                  args: argparse.Namespace,
                  tokenizer: object) -> List[Generator[Dict, None, None]]:
-    """Returens a list of dev/test data geenrators."""
     data_gen_list = []
     for dataname, mode in data_lists:
         data_gen_list.append(get_data_gen(dataname, mode, args, tokenizer))
@@ -323,7 +310,7 @@ def get_datasets(data_lists: List[Tuple[str, str]],
 def evaluate_data(
         batch_num: int,
         dev_fname: str,
-        model: Union[TransformerVecModel, TransformerBoxModel],
+        model: TransformerBoxModelV1,
         id2word_dict: Dict[int, str],
         args: argparse.Namespace,
         device: torch.device
@@ -372,36 +359,6 @@ def evaluate_data(
     dev_gen = None  # Delete a data generator.
     return eval_loss, macro_f1, macro_p, macro_r, micro_f1, micro_p, micro_r, \
            accuracy
-
-
-def get_lr_scheduler(
-        scheduler_type: str,
-        optimizer: torch.optim.Optimizer,
-        warmup_steps: Optional[int] = 0,
-        max_steps: Optional[bool] = None,
-        base_lr: float = 1e-4,
-        max_lr: float = 1e-3,
-        step_size_up: int = 2000
-) -> torch.optim.lr_scheduler:
-    """Returns lr scheduler."""
-    if scheduler_type == "linear":
-        return get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps = warmup_steps,
-            num_training_steps = max_steps)
-    elif scheduler_type == "cos_hard_restart":
-        return get_cosine_with_hard_restarts_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps = warmup_steps,
-            num_training_steps = max_steps,
-            num_cycles = 3)
-    elif scheduler_type == "cyclic":
-        return torch.optim.lr_scheduler.CyclicLR(
-            optimizer,
-            base_lr,
-            max_lr,
-            step_size_up = step_size_up,
-            cycle_momentum = False)
 
 
 def f1(p: float, r: float) -> float:
@@ -470,36 +427,17 @@ def micro(
 def load_model(reload_model_name: str,
                save_dir: str,
                model_id: str,
-               model: Union[TransformerVecModel, TransformerBoxModel],
+               model: TransformerBoxModelV1,
                optimizer_enc: Optional[torch.optim.Optimizer] = None,
                optimizer_cls: Optional[torch.optim.Optimizer] = None,
                scheduler_enc: Optional[object] = None,
                scheduler_cls: Optional[object] = None):
-    """Loads a trained model."""
     if reload_model_name:
         model_file_name = "{0:s}/{1:s}.pt".format(save_dir, reload_model_name)
     else:
         model_file_name = "{0:s}/{1:s}.pt".format(save_dir, model_id)
     checkpoint = torch.load(model_file_name)
-    model.load_state_dict(checkpoint["state_dict"], strict = False)
-    if optimizer_enc and optimizer_cls:  # Continue training
-        optimizer_enc.load_state_dict(checkpoint["optimizer_enc"])
-        optimizer_cls.load_state_dict(checkpoint["optimizer_cls"])
-    if scheduler_enc and scheduler_cls:
-        scheduler_enc.load_state_dict(checkpoint["scheduler_enc"])
-        scheduler_cls.load_state_dict(checkpoint["scheduler_cls"])
-    else:  # Test
-        total_params = 0
-        # Log params
-        for k in checkpoint["state_dict"]:
-            elem = checkpoint["state_dict"][k]
-            param_s = 1
-            for size_dim in elem.size():
-                param_s = size_dim * param_s
-            # print(k, elem.size())
-            total_params += param_s
-        param_str = ("Number of total parameters..{0:d}".format(total_params))
-        print(param_str)
+    model.load_state_dict(checkpoint["state_dict"], strict=False)
     print("Loading model from ... {0:s}".format(model_file_name))
 
 
@@ -564,7 +502,7 @@ def get_eval_string(true_prediction: List[Tuple[List[str], List[str]]]) -> str:
 
 
 def _test(args: argparse.Namespace,
-          model: Union[TransformerVecModel, TransformerBoxModel],
+          model: TransformerBoxModelV1,
           device: torch.device):
     print("==> Start eval...")
     assert args.load
@@ -594,7 +532,7 @@ def _test(args: argparse.Namespace,
         for batch_num, batch in enumerate(dataset):
             inputs, targets = to_torch(batch, device)
             annot_ids = batch.pop("ex_ids")
-            _, output_logits = model(inputs)
+            output_logits = model(inputs)
             output_index = get_output_index(
                 output_logits,
                 threshold = args.threshold,
@@ -632,7 +570,7 @@ def main():
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
-    model = TransformerBoxModel(args, constant.ANSWER_NUM_DICT[args.goal])
+    model = TransformerBoxModelV1(args, constant.ANSWER_NUM_DICT[args.goal])
     if args.local_rank == 0:
         torch.distributed.barrier()
     model.to(args.device)
