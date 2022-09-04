@@ -1,10 +1,9 @@
-def tokenize_inputs(inputs, tokenizer, max_len):
-    return tokenizer.batch_encode_plus(
-        inputs,
-        add_special_tokens=True,
-        max_length=max_len,
-        truncation_strategy="only_second",
-        pad_to_max_length=True,
-        return_tensors="pt",
-        truncation=True
-    )
+from models.transformer_box_model import TransformerBoxModel
+from utils.mention_context_similarity import get_mention_context_similarity
+
+model = TransformerBoxModel()
+text = [["Trump", "Trump is one of bad presidents of the US"],
+        ["Peter Trump", "Peter Trump is a British footballer"]]
+rep = model.build_representation_from_texts(text)
+sim = get_mention_context_similarity(rep, rep)
+print(sim)

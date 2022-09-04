@@ -19,7 +19,7 @@ def get_mention_context_similarity(mention_context_box1, mention_context_box2):
     # Clip values > 1 for numerical stability
     if (log_probs > 0.0).any():
         log_probs[log_probs > 0.0] = 0.0
-    return log_probs
+    return torch.exp(log_probs)
 
 
 def log_soft_volume(point1: torch.Tensor, point2: torch.Tensor) -> torch.Tensor:

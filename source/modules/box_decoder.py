@@ -4,9 +4,9 @@ import torch.nn.functional as F
 
 from typing import Optional, Tuple
 
-from box_wrapper import BoxTensor, log1mexp
-from box_wrapper import CenterBoxTensor
-from box_wrapper import ConstantBoxTensor, CenterSigmoidBoxTensor
+from utils.box_wrapper import BoxTensor, log1mexp
+from utils.box_wrapper import CenterBoxTensor
+from utils.box_wrapper import ConstantBoxTensor, CenterSigmoidBoxTensor
 from modules.type_self_attention_layer import TypeSelfAttentionLayer
 from utils.mention_context_similarity import get_mention_context_similarity
 
@@ -209,7 +209,7 @@ class BoxDecoder(nn.Module):
                               device=self.box_embeddings.weight.device)
         emb = self.box_embeddings(inputs)  # num types x 2*box_embedding_dim
         type_box = self.box.from_split(emb)
-        return get_mention_context_similarity(mention_context_box, type_box), None, None
+        return get_mention_context_similarity(mention_context_box, type_box)
 
 
 def get_classifier(args, answer_num):
