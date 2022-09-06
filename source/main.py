@@ -10,10 +10,9 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import Dict, Generator, List, Optional, Tuple, Union
 import constant
-from models.transformer_box_model_v1 import TransformerBoxModelV1
+from models.box_model_classifier import BoxModelClassifier
 from data_utils import DatasetLoader
 from data_utils import to_torch
-from modules.box_decoder import get_classifier
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_id", help = "Identifier for model")
@@ -310,7 +309,7 @@ def get_datasets(data_lists: List[Tuple[str, str]],
 def evaluate_data(
         batch_num: int,
         dev_fname: str,
-        model: TransformerBoxModelV1,
+        model: BoxModelClassifier,
         id2word_dict: Dict[int, str],
         args: argparse.Namespace,
         device: torch.device
@@ -427,7 +426,7 @@ def micro(
 def load_model(reload_model_name: str,
                save_dir: str,
                model_id: str,
-               model: TransformerBoxModelV1,
+               model: BoxModelClassifier,
                optimizer_enc: Optional[torch.optim.Optimizer] = None,
                optimizer_cls: Optional[torch.optim.Optimizer] = None,
                scheduler_enc: Optional[object] = None,
@@ -502,7 +501,7 @@ def get_eval_string(true_prediction: List[Tuple[List[str], List[str]]]) -> str:
 
 
 def _test(args: argparse.Namespace,
-          model: TransformerBoxModelV1,
+          model: BoxModelClassifier,
           device: torch.device):
     print("==> Start eval...")
     assert args.load
@@ -539,6 +538,7 @@ def _test(args: argparse.Namespace,
                 is_prob = True if args.emb_type == "box" else False)
             output_prob = output_logits.data.cpu().clone().numpy()
             y = batch["targets"].data.cpu().clone()
+            # Predict types
             gold_pred = get_gold_pred_str(output_index, y, id2word_dict)
             total_probs.extend(output_prob)
             total_ys.extend(y)
@@ -570,7 +570,7 @@ def main():
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
-    model = TransformerBoxModelV1(args, constant.ANSWER_NUM_DICT[args.goal])
+    model = BoxModelClassifier()
     if args.local_rank == 0:
         torch.distributed.barrier()
     model.to(args.device)
